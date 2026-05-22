@@ -16,7 +16,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write, stdout};
+use std::io::{BufReader, BufWriter, Read, Write, stdin, stdout};
 use std::process::exit;
 
 use clap::{Arg, ArgAction, ArgMatches, command, value_parser};
@@ -201,7 +201,14 @@ impl OxiGen {
         // eprintln!("Writer spawned");
 
         // Create CSV reader based on command line options
-        let file = BufReader::with_capacity(100000, File::open(&self.input).unwrap());
+        let input_reader: Box<dyn Read + Send> = if self.input == "STDIN" {
+            Box::new(BufReader::with_capacity(100000, stdin()))
+        } else {
+            Box::new(BufReader::with_capacity(
+                100000,
+                File::open(&self.input).unwrap(),
+            ))
+        };
         let mut rdr = ReaderBuilder::new()
             .has_headers(self.headers)
             .delimiter(match self.tab {
@@ -210,7 +217,7 @@ impl OxiGen {
             })
             .quote(self.quote_char.chars().next().unwrap() as u8)
             .escape(Some(self.escape_char.chars().next().unwrap() as u8))
-            .from_reader(file);
+            .from_reader(input_reader);
         let normalize = self.normalize;
         let has_headers = self.headers;
         let split = self.split.clone();

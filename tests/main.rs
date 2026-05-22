@@ -5,7 +5,9 @@ use oxrdf::graph::CanonicalizationAlgorithm;
 use oxrdfio::RdfParser;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 #[test]
 fn test_integration_split_with_custom_functions() {
@@ -898,5 +900,58 @@ fn test_integration_test_row_limit() {
         14,
         "Expected 14 triples (2 FixedMeta + 4×3 rows), got {}",
         triples.len()
+    );
+}
+
+#[test]
+fn test_integration_stdin_input() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let query_path = manifest_dir.join("tests/fixtures/optional_field.rq");
+    let csv_path = manifest_dir.join("tests/fixtures/optional_field.csv");
+
+    let csv_content = fs::read_to_string(&csv_path).expect("Should read CSV fixture");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oxi_gen"))
+        .args([
+            "--query",
+            query_path.to_str().unwrap(),
+            "--output",
+            "STDOUT",
+            "--ntriples",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Should spawn oxi_gen binary");
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(csv_content.as_bytes())
+        .expect("Should write CSV to stdin");
+
+    let output = child
+        .wait_with_output()
+        .expect("Should wait for child process");
+
+    assert!(
+        output.status.success(),
+        "Binary should exit successfully; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = String::from_utf8(output.stdout).expect("Output should be valid UTF-8");
+    let triple_count = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+
+    // Same fixture as test_integration_optional_field_empty_values: 5 triples expected
+    assert_eq!(
+        triple_count, 5,
+        "Expected 5 triples from stdin input, got {}",
+        triple_count
     );
 }
