@@ -1,5 +1,6 @@
 use flate2::read::GzDecoder;
 use oxi_gen::configure_transform;
+use oxi_gen::flush_store;
 use oxrdf::Graph;
 use oxrdf::graph::CanonicalizationAlgorithm;
 use oxrdfio::RdfParser;
@@ -943,6 +944,149 @@ fn test_integration_stdin_input() {
     );
 
     let content = String::from_utf8(output.stdout).expect("Output should be valid UTF-8");
+    let triple_count = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+
+    // Same fixture as test_integration_optional_field_empty_values: 5 triples expected
+    assert_eq!(
+        triple_count, 5,
+        "Expected 5 triples from stdin input, got {}",
+        triple_count
+    );
+}
+
+
+// NEW
+#[test]
+fn test_triple_to_quad_conversion() {
+    use oxrdf::*;
+
+    let graph_iri = "http://example.org/graph";
+
+    let triple = Triple::new(
+        NamedNode::new("http://s").unwrap(),
+        NamedNode::new("http://p").unwrap(),
+        NamedNode::new("http://o").unwrap(),
+    );
+
+    let quad = Quad::new(
+        triple.subject,
+        triple.predicate,
+        triple.object,
+        NamedNode::new(graph_iri).unwrap(),
+    );
+
+    match quad.graph_name {
+        GraphName::NamedNode(ref nn) => {
+            assert_eq!(nn.as_str(), graph_iri);
+        }
+        _ => panic!("Expected a NamedNode graph name"),
+    }
+}
+
+
+#[test]
+fn test_nquads_serialization_includes_graph() {
+    use oxrdf::*;
+    use oxrdfio::RdfFormat;
+    use std::collections::HashSet;
+    use std::io::{BufWriter, Cursor};
+
+    let mut store = HashSet::<Quad>::new();
+
+    store.insert(Quad::new(
+        NamedNode::new("http://s").unwrap(),
+        NamedNode::new("http://p").unwrap(),
+        NamedNode::new("http://o").unwrap(),
+        NamedNode::new("http://example.org/graph").unwrap(),
+    ));
+
+    // Concrete writer type: Cursor<Vec<u8>>
+    let cursor = Cursor::new(Vec::<u8>::new());
+    let mut writer = BufWriter::new(cursor);
+
+    flush_store(
+        &mut store,
+        &mut writer,
+        RdfFormat::NQuads,
+        &std::collections::HashMap::new(),
+        true,
+    ).unwrap();
+
+    // Extract the Cursor<Vec<u8>>
+    let cursor = writer.into_inner().unwrap();
+    let output = String::from_utf8(cursor.into_inner()).unwrap();
+
+    assert!(output.contains("<http://example.org/graph>"));
+    assert!(output.contains("<http://s>"));
+    assert!(output.contains("<http://p>"));
+    assert!(output.contains("<http://o>"));
+}
+
+
+
+#[test]
+fn test_parse_graph_argument() {
+    let args = vec![
+        "oxi-gen".to_string(),
+        "--query".to_string(), "dummy.sparql".to_string(),
+        "--graph".to_string(), "http://example.org/graph".to_string(),
+    ];
+
+    let cfg = configure_transform(args);
+
+    assert_eq!(
+        cfg.graph,
+        Some("http://example.org/graph".to_string())
+    );
+}
+
+
+#[test]
+fn test_integration_quads_stdin_input() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let query_path = manifest_dir.join("tests/fixtures/optional_field.rq");
+    let csv_path = manifest_dir.join("tests/fixtures/optional_field.csv");
+
+    let csv_content = fs::read_to_string(&csv_path).expect("Should read CSV fixture");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oxi_gen"))
+        .args([
+            "--query",
+            query_path.to_str().unwrap(),
+            "--output",
+            "STDOUT",
+            "--graph",
+            "http://example.org/graph"
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Should spawn oxi_gen binary");
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(csv_content.as_bytes())
+        .expect("Should write CSV to stdin");
+
+    let output = child
+        .wait_with_output()
+        .expect("Should wait for child process");
+
+    assert!(
+        output.status.success(),
+        "Binary should exit successfully; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = String::from_utf8(output.stdout).expect("Output should be valid UTF-8");
+    println!("Captured N-Quads output:\n{}", content);
+
     let triple_count = content
         .lines()
         .filter(|line| !line.trim().is_empty())

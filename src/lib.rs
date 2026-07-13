@@ -39,6 +39,9 @@ pub struct OxiGen {
     pub output: String,
     pub query: String,
     pub split: Vec<(String, String, String)>,
+
+    // NEW: optional named graph
+    pub graph: Option<String>,
 }
 
 impl OxiGen {
@@ -140,16 +143,27 @@ impl OxiGen {
 
         let output_path = self.output.clone();
         let compress = self.gzip;
-        let output_format = if self.ntriples {
+
+        // Named graph forces N-Quads output; single graph shared by every triple
+        let output_format = if self.graph.is_some() {
+            RdfFormat::NQuads
+        } else if self.ntriples {
             RdfFormat::NTriples
         } else {
             RdfFormat::Turtle
         };
+
+        let graph_name = self
+            .graph
+            .as_ref()
+            .map(|iri| NamedNode::new(iri.clone()).unwrap());
         let dedup = self.dedup;
         let test_rows = self.test;
+
         let writer_task = thread::spawn(move || {
             // eprintln!("Writer started");
             // Open the output file. Will use the filename if given or STDOUT if not
+
             let mut out_writer: BufWriter<Box<dyn Write>> =
                 BufWriter::new(match output_path.as_ref() {
                     "STDOUT" => Box::new(stdout()) as Box<dyn Write>,
@@ -164,27 +178,28 @@ impl OxiGen {
                         }
                     }
                 });
-
             // Track first output, to only emit prefixes once to Turtle
             let mut first_time = true;
+
             let mut store = HashSet::<Triple>::new();
 
             while let Ok(row_triples) = triple_rx.recv() {
                 // eprintln!("Received {}: {:?}", &row_triples);
                 store.extend(row_triples);
-                if !store.is_empty() && (dedup == 0 || store.len() >= dedup.try_into().unwrap()) {
+
+                if !store.is_empty() && (dedup == 0 || store.len() >= dedup as usize) {
                     flush_store(
                         &mut store,
                         &mut out_writer,
                         output_format,
                         &prefixes,
                         first_time,
+                        graph_name.as_ref(),
                     )
                     .unwrap();
                     first_time = false;
                 }
             }
-
             // If deduplicating, flush remaining store to output
             if dedup > 0 && !store.is_empty() {
                 flush_store(
@@ -193,9 +208,11 @@ impl OxiGen {
                     output_format,
                     &prefixes,
                     first_time,
+                    graph_name.as_ref(),
                 )
                 .unwrap();
             }
+
             out_writer.flush().expect("Error flushing to output file");
         });
         // eprintln!("Writer spawned");
@@ -252,6 +269,7 @@ impl OxiGen {
 
                 // The iterator yields Result<StringRecord, Error>, so we check the
                 // error here.
+
                 let record: Vec<String> = match result {
                     Ok(r) => r.iter().map(|s| s.to_string()).collect(),
                     Err(e) => {
@@ -265,10 +283,11 @@ impl OxiGen {
                 csv_senders[transformer].send((row, unwrapped)).unwrap();
                 transformer = (transformer + 1) % num_workers;
                 row += 1;
-                if row % 50000 == 0 {
-                    // eprintln!("Sent {row} rows");
-                }
             }
+            if row % 50000 == 0 {
+                // eprintln!("Sent {row} rows");
+            }
+
             for channel in csv_senders {
                 drop(channel);
             }
@@ -331,20 +350,31 @@ fn apply_split<'a>(
     bindings
 }
 
-fn flush_store(
+pub fn flush_store<W: Write>(
     store: &mut HashSet<Triple>,
-    out_writer: &mut BufWriter<Box<dyn Write + 'static>>,
+    out_writer: &mut BufWriter<W>,
     format: RdfFormat,
     prefixes: &HashMap<String, String>,
     first_time: bool,
+    graph_name: Option<&NamedNode>,
 ) -> Result<(), Box<dyn Error + 'static>> {
     let mut config = RdfSerializer::from_format(format);
+
+    // Prefixes only apply to Turtle
     if format == RdfFormat::Turtle {
         for (prefix, iri) in prefixes {
             config = config.with_prefix(prefix, iri).expect("Invalid prefix IRI");
         }
     }
+
     let mut serializer = config.for_writer(Vec::new());
+
+    let graph_ref: GraphNameRef = match graph_name {
+        Some(node) => node.as_ref().into(),
+        None => GraphNameRef::DefaultGraph,
+    };
+
+    // Sort only for Turtle
     if format == RdfFormat::Turtle {
         let mut sorted: Vec<_> = store.iter().collect();
         sorted.sort_by_key(|t| {
@@ -354,18 +384,27 @@ fn flush_store(
                 t.object.to_string(),
             )
         });
+
         for triple in sorted.iter() {
             serializer.serialize_triple(*triple)?;
         }
+    } else if format == RdfFormat::NQuads {
+        for triple in store.iter() {
+            serializer.serialize_quad(triple.as_ref().in_graph(graph_ref))?;
+        }
     } else {
+        // N-Triples
         for triple in store.iter() {
             serializer.serialize_triple(triple)?;
         }
     }
+
     let mut rdf_str = serializer.finish().unwrap();
+
+    // Remove prefix lines after first Turtle block
     if !first_time && format == RdfFormat::Turtle {
         // Remove all leading prefix lines
-        while rdf_str.get(0..7).is_some_and(|s| s == b"@prefix") {
+        while rdf_str.starts_with(b"@prefix") {
             if let Some(pos) = rdf_str.iter().position(|c| *c == b'\n') {
                 rdf_str = rdf_str.split_off(pos + 1);
             } else {
@@ -374,7 +413,8 @@ fn flush_store(
             }
         }
     }
-    let _ = out_writer.write_all(&rdf_str);
+
+    out_writer.write_all(&rdf_str)?;
     store.clear();
     Ok(())
 }
@@ -571,6 +611,13 @@ where
                 .required(true)
                 .help("File containing a SPARQL query to be applied to an input file (required)"),
         )
+        // NEW: optional named graph
+        .arg(
+            Arg::new("graph")
+                .long("graph")
+                .action(ArgAction::Set)
+                .help("Named graph IRI (enables N-Quads output)"),
+        )
         .get_matches_from(args)
 }
 
@@ -617,6 +664,9 @@ where
         output: matches.get_one::<String>("output").unwrap().to_string(),
         query: matches.get_one::<String>("query").unwrap().to_string(),
         split: split_def,
+
+        // NEW
+        graph: matches.get_one::<String>("graph").cloned(),
     }
 }
 
@@ -948,8 +998,64 @@ mod tests {
             RdfFormat::NTriples,
             &HashMap::new(),
             true,
+            None,
         );
         assert!(result.is_ok());
         assert_eq!(store.len(), 0); // Store should be cleared
+    }
+
+    #[test]
+    fn test_integration_nquads_named_graph() {
+        use oxrdfio::RdfParser;
+        use std::path::PathBuf;
+
+        let temp_file = std::env::temp_dir().join("oxi_gen_test_nquads.nq");
+        let _ = std::fs::remove_file(&temp_file);
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let input_path = manifest_dir.join("tests/fixtures/optional_field.csv");
+        let query_path = manifest_dir.join("tests/fixtures/optional_field.rq");
+
+        let graph_iri = "http://example.org/graph";
+
+        let args = vec![
+            "oxi_gen".to_string(),
+            "--input".to_string(),
+            input_path.to_str().unwrap().to_string(),
+            "--query".to_string(),
+            query_path.to_str().unwrap().to_string(),
+            "--output".to_string(),
+            temp_file.to_str().unwrap().to_string(),
+            "--graph".to_string(),
+            graph_iri.to_string(),
+        ];
+
+        let mut transform = configure_transform(args);
+        let result = transform.transform();
+        assert!(
+            result.is_ok(),
+            "Transform should succeed: {:?}",
+            result.err()
+        );
+
+        let file = File::open(&temp_file).expect("Should open output file");
+        let parser = RdfParser::from_format(RdfFormat::NQuads).for_reader(file);
+
+        let mut quad_count = 0;
+        for q in parser {
+            let quad = q.expect("Failed to parse N-Quads output");
+            assert_eq!(
+                quad.graph_name.to_string(),
+                format!("<{}>", graph_iri),
+                "Every quad should be placed in the named graph"
+            );
+            quad_count += 1;
+        }
+
+        let _ = std::fs::remove_file(&temp_file);
+
+        // Same fixture as optional_field.rq/csv: row 1 (non-empty alt_label) -> 3 triples,
+        // row 2 (empty alt_label, skipped by default) -> 2 triples = 5 total
+        assert_eq!(quad_count, 5, "Expected 5 quads, got {}", quad_count);
     }
 }
