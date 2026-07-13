@@ -95,7 +95,7 @@ impl OxiGen {
             let query_vars = query_vars.clone();
             transformers.push(thread::spawn(move || {
                 let mut processed = 0;
-                // eprintln!("Transformer {} started", tid);                
+                // eprintln!("Transformer {} started", tid);
                 let empty_store = Dataset::new();
                 while let Ok((row, unwrapped)) = receiver.recv() {
                     // eprintln!("Received {}: {:?}", row, &unwrapped);
@@ -133,7 +133,7 @@ impl OxiGen {
                     processed += 1;
                     if processed % 50000 == 0 {
                         // eprintln!("Transformer {tid} processed {processed} rows");
-                    }                    
+                    }
                 }
                 drop(triple_tx);
                 // eprintln!("Transformer {tid} finished {processed} rows");
@@ -240,7 +240,7 @@ impl OxiGen {
         let split = self.split.clone();
 
         let reader_task = thread::spawn(move || {
-           // eprintln!("Reader started");
+            // eprintln!("Reader started");
             // Extract headers from the CSV, unless --no-header-row is used, in
             // which case columns are aliased to 'a'..'z', 'A'..'Z' (max 52 columns)
             let mut headers = Vec::new();
@@ -284,9 +284,9 @@ impl OxiGen {
                 transformer = (transformer + 1) % num_workers;
                 row += 1;
             }
-                if row % 50000 == 0 {
-                    // eprintln!("Sent {row} rows");
-                }
+            if row % 50000 == 0 {
+                // eprintln!("Sent {row} rows");
+            }
 
             for channel in csv_senders {
                 drop(channel);
@@ -349,7 +349,6 @@ fn apply_split<'a>(
     }
     bindings
 }
-
 
 pub fn flush_store<W: Write>(
     store: &mut HashSet<Triple>,
@@ -419,7 +418,6 @@ pub fn flush_store<W: Write>(
     store.clear();
     Ok(())
 }
-
 
 fn expand_prefix(prefixes: &HashMap<String, String>, prefix: &Term) -> Option<Term> {
     let prefix_name = match prefix {
